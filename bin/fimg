@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+# bin/fimg — entrypoint w/ symlink resolution + 'r' (relink & chmod all)
+
+set -eu
+
+resolve_dir() {
+  tgt=$1
+  while [ -L "$tgt" ]; do
+    dir=$(cd -P -- "$(dirname -- "$tgt")" && pwd)
+    link=$(readlink "$tgt")
+    case $link in /*) tgt="$link" ;; *) tgt="$dir/$link" ;; esac
+  done
+  cd -P -- "$(dirname -- "$tgt")" && pwd
+}
+
+SCRIPT_DIR=$(resolve_dir "$0")
+ROOT_DIR=$(cd -P -- "$SCRIPT_DIR/.." && pwd)
+
+if [ "${1-}" = "r" ]; then
+  # make every .sh in the project executable (idempotent)
+  find "$ROOT_DIR" -type f -name '*.sh' -exec chmod +x {} \;
+  sudo ln -sf "$ROOT_DIR/bin/fimg" /usr/local/bin/fimg
+  hash -r
+  echo "fimg reloaded & relinked."
+  exit 0
+fi
+
+exec "$ROOT_DIR/ui/landing.sh" "$@"
