@@ -45,41 +45,45 @@ EOF
 [ $# -eq 0 ] && exec "$UI_LAUNCH"
 
 case "${1-}" in
-  -h|--help) print_help; exit 0 ;;
-  -r)
-    shift
-    echo "[fimg] Reloading…"
-    find "$ROOT_DIR" -type f -name '*.sh' -exec chmod +x {} \; || true
-    find "$ROOT_DIR" -type f -name '*.py' -exec chmod +x {} \; || true
-    # Relink
-    WANT="$ROOT_DIR/bin/fimg"
-    if sudo ln -sf "$WANT" /usr/local/bin/fimg 2>/dev/null; then :; else
-      mkdir -p "$HOME/bin"; ln -sf "$WANT" "$HOME/bin/fimg"
-      case ":$PATH:" in *":$HOME/bin:"*) : ;; *) export PATH="$HOME/bin:$PATH" ;; esac
-    fi
-    hash -r 2>/dev/null || true
-    command -v rehash >/dev/null 2>&1 && rehash || true
-    echo "✅ reloaded. which fimg => $(command -v fimg || echo not-found)"
-    exit 0
-    ;;
-  -c)
-    shift
-    [ -x "$BLAST_PY" ] || { echo "[fimg] blast not found: $BLAST_PY" >&2; exit 2; }
-    exec "$BLAST_PY" "$@"
-    ;;
-  -e)
-    shift
-    [ -x "$EDIT_PY" ] || { echo "[fimg] editor not found: $EDIT_PY" >&2; exit 2; }
-    exec "$EDIT_PY" "$@"
-    ;;
-  send|test)
-    shift
-    [ -x "$ENGINE_TEST_PY" ] || { echo "[fimg] tester not found: $ENGINE_TEST_PY" >&2; exit 2; }
-    exec "$ENGINE_TEST_PY" "$@"
-    ;;
-  *)
-    # anything else launches UI (prevents accidental editor invocation)
-    exec "$UI_LAUNCH" "$@"
-    ;;
+-h | --help)
+  print_help
+  exit 0
+  ;;
+-r)
+  shift
+  echo "[fimg] Reloading…"
+  find "$ROOT_DIR" -type f -name '*.sh' -exec chmod +x {} \; || true
+  find "$ROOT_DIR" -type f -name '*.py' -exec chmod +x {} \; || true
+  # Relink
+  WANT="$ROOT_DIR/bin/fimg"
+  if sudo ln -sf "$WANT" /usr/local/bin/fimg 2>/dev/null; then :; else
+    mkdir -p "$HOME/bin"
+    ln -sf "$WANT" "$HOME/bin/fimg"
+    case ":$PATH:" in *":$HOME/bin:"*) : ;; *) export PATH="$HOME/bin:$PATH" ;; esac
+  fi
+  hash -r 2>/dev/null || true
+  command -v rehash >/dev/null 2>&1 && rehash || true
+  echo "✅ reloaded. which fimg => $(command -v fimg || echo not-found)"
+  exit 0
+  ;;
+-c)
+  shift
+  [ -x "$BLAST_PY" ] || {
+    echo "[fimg] blast not found: $BLAST_PY" >&2
+    exit 2
+  }
+  exec "$BLAST_PY" "$@"
+  ;;
+-e)
+  shift
+  [ -f "$EDIT_PY" ] || {
+    echo "[fimg] editor not found: $EDIT_PY" >&2
+    exit 2
+  }
+  exec python3 "$EDIT_PY" "$@"
+  ;;
+*)
+  # anything else launches UI (prevents accidental editor invocation)
+  exec "$UI_LAUNCH" "$@"
+  ;;
 esac
-

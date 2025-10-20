@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-# engine/edit_list.py — roster editor used by: fimg -e r [list] | fimg -e a [list]
+# engine/edit_list.py — roster editor used by: fimg -e [a|r] [list]
 # CSV schema: name,number,alias
 
 import sys, csv, re, os, unicodedata, readline
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
+
+# Force line-buffered stdout so prints appear before raw key reads
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 # ---------- colors ----------
 def _color_on() -> bool:
@@ -16,7 +22,12 @@ BOLD, DIM = C("1"), C("2")
 HDR, META, OK, WARN, ERR = C("95"), C("90"), C("32"), C("33"), C("31")
 NAME, NUM, RST = C("97"), C("36"), C("0")
 
-# ---------- key helpers ----------
+# ---------- terminal helpers ----------
+def _cls():
+    """Clear terminal and move cursor to top-left."""
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
 def _read_single_key(prompt: str) -> str:
     import termios, tty
     sys.stdout.write(prompt); sys.stdout.flush()
@@ -29,10 +40,27 @@ def _read_single_key(prompt: str) -> str:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
     sys.stdout.write("\n"); sys.stdout.flush()
     return ch
+
 def confirm_enter_else_cancel(prompt: str) -> bool:
     return _read_single_key(prompt) in ("\r", "\n")
 
 # ---------- paths & list resolution ----------
+ROOT  = Path(__file__).resolve().parents[1]
+LISTS = ROOT / "lists"
+
+def resolve_csv(arg: str) -> Path:
+    key = (arg or "").lower()
+    if key in {"pledges", "brothers", "actives", "all"}:
+        file_key = "brothers" if key in {"brothers", "actives"} else key
+        return (LISTS / f"{file_key}.csv").resolve()
+    p = Path(arg).expanduser()
+    if p.suffix == "": p = p.with_suffix(".csv")
+    return p.resolve()
+
+def list_choices() -> List[Path]:
+    LISTS.mkdir(parents=True, exist_ok=True)
+    return sorted(LISTS.glob("*.csv"))
+
 def _pick_one_key(max_n: int, prompt: str) -> Optional[int]:
     """
     If max_n <= 9, read a single key (1..max_n) without Enter.
@@ -57,39 +85,20 @@ def _pick_one_key(max_n: int, prompt: str) -> Optional[int]:
         i = int(s)
         return i if 1 <= i <= max_n else None
 
-
-ROOT  = Path(__file__).resolve().parents[1]
-LISTS = ROOT / "lists"
-
-def resolve_csv(arg: str) -> Path:
-    key = (arg or "").lower()
-    if key in {"pledges", "brothers", "actives", "all"}:
-        file_key = "brothers" if key in {"brothers", "actives"} else key
-        return (LISTS / f"{file_key}.csv").resolve()
-    p = Path(arg).expanduser()
-    if p.suffix == "": p = p.with_suffix(".csv")
-    return p.resolve()
-
-def list_choices() -> List[Path]:
-    LISTS.mkdir(parents=True, exist_ok=True)
-    return sorted(LISTS.glob("*.csv"))
-
 def pick_from(paths: List[Path], title: str) -> Optional[Path]:
+    _cls()
     if not paths:
         print(f"{WARN}No lists found.{RST}")
         return None
-
     print(f"{HDR}{title}{RST}")
     for i, p in enumerate(paths, 1):
         print(f" {DIM}{i:>2}{RST}) {p.stem}  {META}({p.name}){RST}")
-
-    # Single-key when there are ≤9 choices; 'q' cancels
     max_n = len(paths)
+    sys.stdout.flush()
     idx = _pick_one_key(max_n, f"{BOLD}Choose [1-{max_n}]:{RST} ")
     if idx is None:
         print("Canceled.")
         return None
-
     return paths[idx - 1]
 
 # ---------- util & IO ----------
@@ -208,8 +217,10 @@ def setup_readline(people: List[Dict]):
     except Exception:
         pass
 
-# ---------- add/remove actions ----------
+# ---------- actions ----------
 def action_remove(csv_path: Path):
+    # Screen 1: header + input
+    _cls()
     people = load_contacts(csv_path)
     print_header(csv_path.stem, csv_path.name)
     if not people:
@@ -229,30 +240,40 @@ def action_remove(csv_path: Path):
         chosen, missing = people[:], [t for t in tokens if _norm(t) != "all"]
     else:
         chosen, missing = resolve_tokens(tokens, people)
-    if missing: print(f"{WARN}Unmatched:{RST} " + ", ".join(missing))
 
+    # Screen 2: preview table
+    _cls()
+    print_header(csv_path.stem, csv_path.name)
+    if missing: print(f"{WARN}Unmatched:{RST} " + ", ".join(missing))
     print(); print_table(chosen, caption=f"Recipients to remove ({len(chosen)}):"); print()
     if not confirm_enter_else_cancel(f"{WARN}Press Enter to remove{RST}, or any other key to cancel: "):
         print("Canceled."); return
 
+    # Screen 3: progress
+    _cls()
     n = len(chosen)
+    print_header(csv_path.stem, csv_path.name)
     print(f"{WARN}removing {n} person..{RST}")
     for r in chosen: print(f"  -> {r['name']}")
 
+    # Screen 4: commit + final summary
     if all_requested:
         ch = _read_single_key(f"{WARN}Delete file {csv_path.name} too? (y/N): ")
         if ch in ("y","Y"):
             try: os.remove(csv_path)
             except FileNotFoundError: pass
+            _cls(); print_header(csv_path.stem, csv_path.name)
             print(f"{OK}removed {n} | 0 left in {csv_path.name}{RST}")
             return
         write_csv_no_backup(csv_path, [])
+        _cls(); print_header(csv_path.stem, csv_path.name)
         print(f"{OK}removed {n} | 0 left in {csv_path.name}{RST}")
         return
 
     nums = {c["number"] for c in chosen}
     remaining = [r for r in people if r["number"] not in nums]
     write_csv_no_backup(csv_path, remaining)
+    _cls(); print_header(csv_path.stem, csv_path.name)
     print(f"{OK}removed {n} | {len(remaining)} left in {csv_path.name}{RST}")
 
 def _prompt_one_person(i: int) -> Optional[Dict]:
@@ -264,26 +285,29 @@ def _prompt_one_person(i: int) -> Optional[Dict]:
         alias  = input(f"{BOLD}[{i}] Alias(es) [optional, comma-separated]:{RST} ").strip().lower()
     except (KeyboardInterrupt, EOFError):
         print("\nCanceled."); return None
-    if not number: print(f"{ERR}Number is required; entry skipped.{RST}"); return None
+    if not number:
+        print(f"{ERR}Number is required; entry skipped.{RST}")
+        return None
     return {"name": name, "number": number, "alias": alias}
 
 def action_add(csv_path: Path):
+    # Screen 1: header + how many
+    _cls()
     people = load_contacts(csv_path)
     print_header(csv_path.stem, csv_path.name)
     print(); print(f"{HDR}Add entry{RST}")
 
-    # Ask how many to add; default 1 on blank
     try:
         cnt_raw = input(f"{BOLD}# people to add [default 1]:{RST} ").strip()
     except (KeyboardInterrupt, EOFError):
         print("\nCanceled."); return
     count = 1 if cnt_raw == "" else (int(cnt_raw) if cnt_raw.isdigit() and int(cnt_raw) > 0 else 1)
 
+    # Screen 2: prompts per person (stays on same screen while prompting)
     staged: List[Dict] = []
     for i in range(1, count+1):
         ent = _prompt_one_person(i)
         if ent:
-            # check duplicate number vs existing and staged
             if any(p["number"] == ent["number"] for p in people) or any(s["number"] == ent["number"] for s in staged):
                 print(f"{WARN}That number already exists; skipped.{RST}")
             else:
@@ -292,15 +316,20 @@ def action_add(csv_path: Path):
     if not staged:
         print("No valid entries. Canceled."); return
 
-    print()
+    # Screen 3: staged preview
+    _cls()
+    print_header(csv_path.stem, csv_path.name)
     print_table(staged, caption=f"Entries to add ({len(staged)}):")
     if not confirm_enter_else_cancel(f"{OK}Press Enter to save{RST}, or any other key to cancel: "):
         print("Canceled."); return
 
+    # Screen 4: progress
+    _cls()
+    print_header(csv_path.stem, csv_path.name)
     print(f"{OK}adding {len(staged)} person..{RST}")
     for s in staged: print(f"  -> {s['name']}")
 
-    # commit
+    # Commit + Screen 5: final summary
     for s in staged:
         people.append({
             "name": s["name"], "number": s["number"], "alias": s["alias"],
@@ -311,18 +340,22 @@ def action_add(csv_path: Path):
             "aliases": [a for a in re.split(r"[,\s;/]+", s["alias"]) if a],
         })
     write_csv_no_backup(csv_path, people)
+    _cls(); print_header(csv_path.stem, csv_path.name)
     print(f"{OK}added {len(staged)} | {len(people)} left in {csv_path.name}{RST}")
 
-# ---------- menus when list not provided ----------
+# ---------- menus ----------
 def menu_add() -> Optional[Path]:
+    _cls()
     print(f"{HDR}Add to{RST}")
     print(" 1) Existing list")
     print(" 2) Create new list")
     print(" q) Quit")
-    ch = _read_single_key(f"{BOLD}Choose:{RST} ").lower()  # <-- single key
+    sys.stdout.flush()
+    ch = _read_single_key(f"{BOLD}Choose:{RST} ").lower()
     if ch == "1":
         return pick_from(list_choices(), "Choose list")
     if ch == "2":
+        _cls()
         name = input(f"{BOLD}New list name (no extension):{RST} ").strip()
         if not name:
             print("Canceled."); return None
@@ -335,11 +368,13 @@ def menu_add() -> Optional[Path]:
     print("Canceled."); return None
 
 def menu_remove() -> Optional[Path]:
+    _cls()
     print(f"{HDR}Remove from{RST}")
     print(" 1) Existing list")
     print(" 2) Delete existing list")
     print(" q) Quit")
-    ch = _read_single_key(f"{BOLD}Choose:{RST} ").lower()  # <-- single key
+    sys.stdout.flush()
+    ch = _read_single_key(f"{BOLD}Choose:{RST} ").lower()
     if ch == "1":
         return pick_from(list_choices(), "Choose list")
     if ch == "2":
@@ -352,30 +387,58 @@ def menu_remove() -> Optional[Path]:
                 os.remove(p)
             except FileNotFoundError:
                 pass
+            _cls()
             print(f"{OK}deleted {p.name}{RST}")
         else:
+            _cls()
             print("Canceled delete.")
         return None
     print("Canceled."); return None
 
+def menu_root() -> Optional[Tuple[str, Optional[Path]]]:
+    _cls()
+    print(f"{HDR}Edit lists{RST}")
+    print(" 1) Add to")
+    print(" 2) Remove from")
+    print(" q) Quit")
+    sys.stdout.flush()
+    ch = _read_single_key(f"{BOLD}Choose:{RST} ").lower()
+    if ch == "1":
+        p = menu_add()
+        return ("a", p) if p else None
+    if ch == "2":
+        p = menu_remove()
+        return ("r", p) if p else None
+    print("Canceled.")
+    return None
+
 # ---------- CLI ----------
 def main():
     argv = sys.argv[1:]
-    if not argv or argv[0] not in ("r","a"):
+
+    # If no args: open root menu (Add / Remove)
+    if not argv:
+        sel = menu_root()
+        if not sel:
+            return
+        mode, csv_path = sel
+        if not csv_path:
+            return
+        if mode == "a":
+            action_add(csv_path)
+        else:
+            action_remove(csv_path)
+        return
+
+    # With args: direct modes
+    if argv[0] not in ("r", "a"):
         print("Usage: edit_list.py r|a [<list-or-path>]"); sys.exit(1)
 
     mode = argv[0]
-    csv_path: Optional[Path] = None
-
     if len(argv) >= 2:
         csv_path = resolve_csv(argv[1])
     else:
-        if mode == "a":
-            csv_path = menu_add()
-        elif mode == "r":
-            csv_path = menu_remove()
-        else:
-            csv_path = None
+        csv_path = menu_add() if mode == "a" else menu_remove()
         if csv_path is None:
             return
 
