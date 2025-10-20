@@ -1,6 +1,5 @@
 #!/usr/bin/env sh
-# bin/fimg — flags: -c (CLI), -r (reload), -h (help)
-
+# bin/fimg — explicit flags: -r reload, -c CLI send, -e edit, -h help
 set -eu
 
 resolve_dir() {
@@ -8,10 +7,7 @@ resolve_dir() {
   while [ -L "$tgt" ]; do
     dir=$(cd -P -- "$(dirname -- "$tgt")" && pwd)
     link=$(readlink "$tgt")
-    case $link in
-    /*) tgt="$link" ;;
-    *) tgt="$dir/$link" ;;
-    esac
+    case $link in /*) tgt="$link" ;; *) tgt="$dir/$link" ;; esac
   done
   cd -P -- "$(dirname -- "$tgt")" && pwd
 }
@@ -21,7 +17,8 @@ ROOT_DIR=$(cd -P -- "$SCRIPT_DIR/.." && pwd)
 
 ENGINE_TEST_PY="$ROOT_DIR/engine/test_send.py"
 BLAST_PY="$ROOT_DIR/engine/blast.py"
-LIST_KEYS="all actives brothers pledges"
+EDIT_PY="$ROOT_DIR/engine/edit_list.py"
+UI_LAUNCH="$ROOT_DIR/ui/landing.sh"
 
 print_help() {
   cat <<EOF
@@ -29,96 +26,60 @@ fimg — fast iMessage group
 
 Usage:
   fimg -r
-      FULL reload: chmod +x for all *.sh/*.py, relink global 'fimg',
-      refresh command cache.
+      FULL reload: chmod +x *.sh/*.py; relink /usr/local/bin/fimg; refresh command cache.
 
   fimg -c [all|actives|brothers|pledges] to <names> : <message>
   fimg -c [all|actives|brothers|pledges] <names> : <message>
-  fimg -c to <names> : <message>
-      Force CLI mode; defaults to list = 'all' if omitted.
+      CLI send (no UI). Examples:  fimg -c to bay: yo   |  fimg -c pledges to all: hi
 
-  fimg -h
-      Show this help.
+  fimg -e r <list|path>      # remove entries (Tab-complete names; Enter=go, any other key=cancel)
+  fimg -e a <list|path>      # add a single entry (name → number → alias)
+      <list> may be: pledges | brothers | actives | all, or a CSV path.
 
-(Compat: 'test' / 'send' still route to engine/test_send.py; bare fimg launches UI.)
+  fimg
+      Launch UI.
 EOF
 }
 
-# ----------------------------- FLAGS -----------------------------------------
+# --- no args: launch UI
+[ $# -eq 0 ] && exec "$UI_LAUNCH"
 
-# -h / --help
-if [ "${1-}" = "-h" ] || [ "${1-}" = "--help" ]; then
-  print_help
-  exit 0
-fi
-
-# -r (full reload)
-if [ "${1-}" = "-r" ]; then
-  echo "[fimg] Reloading everything..."
-
-  echo "  • chmod +x for *.sh and *.py"
-  find "$ROOT_DIR" -type f -name '*.sh' -exec chmod +x {} \; || true
-  find "$ROOT_DIR" -type f -name '*.py' -exec chmod +x {} \; || true
-
-  want="$ROOT_DIR/bin/fimg"
-  echo "  • linking $want -> /usr/local/bin/fimg"
-  if sudo ln -sf "$want" /usr/local/bin/fimg 2>/dev/null; then
-    :
-  else
-    mkdir -p "$HOME/bin"
-    ln -sf "$want" "$HOME/bin/fimg"
-    echo "    (no sudo? created user symlink: $HOME/bin/fimg)"
-    case ":$PATH:" in *":$HOME/bin:"*) : ;; *) export PATH="$HOME/bin:$PATH" ;; esac
-  fi
-
-  echo "  • refreshing command cache"
-  hash -r 2>/dev/null || true
-  command -v rehash >/dev/null 2>&1 && rehash || true
-
-  echo "✅ fimg reloaded & relinked."
-  echo "   which fimg => $(command -v fimg || echo 'not found in PATH')"
-  exit 0
-fi
-
-# -c (force CLI blast)
-if [ "${1-}" = "-c" ]; then
-  shift
-  if [ ! -x "$BLAST_PY" ]; then
-    echo "[fimg] blast not found: $BLAST_PY" >&2
-    exit 2
-  fi
-
-  # If first token is a list key and args contain a colon anywhere, route directly.
-  if [ $# -gt 0 ]; then
-    first="$1"
-    case " $LIST_KEYS " in
-    *" $first "*)
-      case "$*" in *:*) exec "$BLAST_PY" "$@" ;; esac
-      ;;
-    esac
-  fi
-
-  # Otherwise, if a colon exists anywhere, default list = 'all'
-  case "$*" in
-  *:*) exec "$BLAST_PY" all "$@" ;;
-  *)
-    echo "Usage: fimg -c [all|actives|brothers|pledges] to <names> : <message>" >&2
-    exit 1
+case "${1-}" in
+  -h|--help) print_help; exit 0 ;;
+  -r)
+    shift
+    echo "[fimg] Reloading…"
+    find "$ROOT_DIR" -type f -name '*.sh' -exec chmod +x {} \; || true
+    find "$ROOT_DIR" -type f -name '*.py' -exec chmod +x {} \; || true
+    # Relink
+    WANT="$ROOT_DIR/bin/fimg"
+    if sudo ln -sf "$WANT" /usr/local/bin/fimg 2>/dev/null; then :; else
+      mkdir -p "$HOME/bin"; ln -sf "$WANT" "$HOME/bin/fimg"
+      case ":$PATH:" in *":$HOME/bin:"*) : ;; *) export PATH="$HOME/bin:$PATH" ;; esac
+    fi
+    hash -r 2>/dev/null || true
+    command -v rehash >/dev/null 2>&1 && rehash || true
+    echo "✅ reloaded. which fimg => $(command -v fimg || echo not-found)"
+    exit 0
     ;;
-  esac
-fi
+  -c)
+    shift
+    [ -x "$BLAST_PY" ] || { echo "[fimg] blast not found: $BLAST_PY" >&2; exit 2; }
+    exec "$BLAST_PY" "$@"
+    ;;
+  -e)
+    shift
+    [ -x "$EDIT_PY" ] || { echo "[fimg] editor not found: $EDIT_PY" >&2; exit 2; }
+    exec "$EDIT_PY" "$@"
+    ;;
+  send|test)
+    shift
+    [ -x "$ENGINE_TEST_PY" ] || { echo "[fimg] tester not found: $ENGINE_TEST_PY" >&2; exit 2; }
+    exec "$ENGINE_TEST_PY" "$@"
+    ;;
+  *)
+    # anything else launches UI (prevents accidental editor invocation)
+    exec "$UI_LAUNCH" "$@"
+    ;;
+esac
 
-# ---------------------------- COMPAT PATHS -----------------------------------
-
-# Keep legacy testers
-if [ "${1-}" = "test" ] || [ "${1-}" = "send" ]; then
-  shift
-  [ -x "$ENGINE_TEST_PY" ] || {
-    echo "[fimg] engine tester not found: $ENGINE_TEST_PY" >&2
-    exit 2
-  }
-  exec "$ENGINE_TEST_PY" "$@"
-fi
-
-# Default: launch UI (unchanged)
-exec "$ROOT_DIR/ui/landing.sh" "$@"
