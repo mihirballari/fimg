@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# bin/fimg — entrypoint w/ symlink resolution + full 'r' reload
+# bin/fimg — flags: -c (CLI), -r (reload), -h (help)
 
 set -eu
 
@@ -23,15 +23,43 @@ ENGINE_TEST_PY="$ROOT_DIR/engine/test_send.py"
 BLAST_PY="$ROOT_DIR/engine/blast.py"
 LIST_KEYS="all actives brothers pledges"
 
-# ----------------------------- FULL RELOAD -----------------------------------
-if [ "${1-}" = "r" ]; then
+print_help() {
+  cat <<EOF
+fimg — fast iMessage group
+
+Usage:
+  fimg -r
+      FULL reload: chmod +x for all *.sh/*.py, relink global 'fimg',
+      refresh command cache.
+
+  fimg -c [all|actives|brothers|pledges] to <names> : <message>
+  fimg -c [all|actives|brothers|pledges] <names> : <message>
+  fimg -c to <names> : <message>
+      Force CLI mode; defaults to list = 'all' if omitted.
+
+  fimg -h
+      Show this help.
+
+(Compat: 'test' / 'send' still route to engine/test_send.py; bare fimg launches UI.)
+EOF
+}
+
+# ----------------------------- FLAGS -----------------------------------------
+
+# -h / --help
+if [ "${1-}" = "-h" ] || [ "${1-}" = "--help" ]; then
+  print_help
+  exit 0
+fi
+
+# -r (full reload)
+if [ "${1-}" = "-r" ]; then
   echo "[fimg] Reloading everything..."
 
   echo "  • chmod +x for *.sh and *.py"
   find "$ROOT_DIR" -type f -name '*.sh' -exec chmod +x {} \; || true
   find "$ROOT_DIR" -type f -name '*.py' -exec chmod +x {} \; || true
 
-  # Relink global 'fimg' (primary /usr/local/bin, fallback ~/bin)
   want="$ROOT_DIR/bin/fimg"
   echo "  • linking $want -> /usr/local/bin/fimg"
   if sudo ln -sf "$want" /usr/local/bin/fimg 2>/dev/null; then
@@ -40,10 +68,7 @@ if [ "${1-}" = "r" ]; then
     mkdir -p "$HOME/bin"
     ln -sf "$want" "$HOME/bin/fimg"
     echo "    (no sudo? created user symlink: $HOME/bin/fimg)"
-    case ":$PATH:" in
-    *":$HOME/bin:"*) : ;;
-    *) export PATH="$HOME/bin:$PATH" ;;
-    esac
+    case ":$PATH:" in *":$HOME/bin:"*) : ;; *) export PATH="$HOME/bin:$PATH" ;; esac
   fi
 
   echo "  • refreshing command cache"
@@ -54,94 +79,45 @@ if [ "${1-}" = "r" ]; then
   echo "   which fimg => $(command -v fimg || echo 'not found in PATH')"
   exit 0
 fi
-# -----------------------------------------------------------------------------
 
-# ------------------------------ HELP -----------------------------------------
-if [ "${1-}" = "--help" ] || [ "${1-}" = "-h" ]; then
-  cat <<EOF
-fimg — fast iMessage group
-
-Usage:
-  fimg r
-      FULL reload: chmod +x for all *.sh/*.py, relink global 'fimg',
-      refresh command cache.
-
-  fimg test to <targets> : <message>
-  fimg send to <targets> : <message>
-      Engine tester (no UI).
-
-  fimg c [all|actives|brothers|pledges] to <names> : <message>
-  fimg c [all|actives|brothers|pledges] <names> : <message>
-  fimg c to <names> : <message>
-      Force CLI mode; defaults to list = 'all' if omitted.
-
-  fimg
-      Launches UI (default).
-EOF
-  exit 0
-fi
-# -----------------------------------------------------------------------------
-
-# Existing explicit testers
-if [ "${1-}" = "test" ] || [ "${1-}" = "send" ]; then
-  shift
-  if [ ! -x "$ENGINE_TEST_PY" ]; then
-    echo "[fimg] engine tester not found: $ENGINE_TEST_PY" >&2
-    exit 2
-  fi
-  exec "$ENGINE_TEST_PY" "$@"
-fi
-
-# --- c / CLI router ----------------------------------------------------------
-if [ "${1-}" = "c" ] || [ "${1-}" = "C" ]; then
+# -c (force CLI blast)
+if [ "${1-}" = "-c" ]; then
   shift
   if [ ! -x "$BLAST_PY" ]; then
     echo "[fimg] blast not found: $BLAST_PY" >&2
     exit 2
   fi
 
-  # If first token is a list key and we have a colon anywhere, route directly.
+  # If first token is a list key and args contain a colon anywhere, route directly.
   if [ $# -gt 0 ]; then
     first="$1"
     case " $LIST_KEYS " in
     *" $first "*)
-      case "$*" in
-      *:*) exec "$BLAST_PY" "$@" ;;
-      *) : ;;
-      esac
+      case "$*" in *:*) exec "$BLAST_PY" "$@" ;; esac
       ;;
-    *) : ;;
     esac
   fi
 
-  # Otherwise, if args contain a colon anywhere, default list = 'all'
+  # Otherwise, if a colon exists anywhere, default list = 'all'
   case "$*" in
   *:*) exec "$BLAST_PY" all "$@" ;;
   *)
-    echo "Usage: fimg c [all|actives|brothers|pledges] to <names> : <message>" >&2
+    echo "Usage: fimg -c [all|actives|brothers|pledges] to <names> : <message>" >&2
     exit 1
     ;;
   esac
 fi
-# -----------------------------------------------------------------------------
 
-# Convenience: "to ... : ..." goes to tester (legacy path for your old flow)
-if [ $# -gt 0 ]; then
-  case "$*" in
-  *:*)
-    case "${1-}" in
-    to | TO)
-      if [ ! -x "$ENGINE_TEST_PY" ]; then
-        echo "[fimg] engine tester not found: $ENGINE_TEST_PY" >&2
-        exit 2
-      fi
-      exec "$ENGINE_TEST_PY" "$@"
-      ;;
-    *) : ;;
-    esac
-    ;;
-  *) : ;;
-  esac
+# ---------------------------- COMPAT PATHS -----------------------------------
+
+# Keep legacy testers
+if [ "${1-}" = "test" ] || [ "${1-}" = "send" ]; then
+  shift
+  [ -x "$ENGINE_TEST_PY" ] || {
+    echo "[fimg] engine tester not found: $ENGINE_TEST_PY" >&2
+    exit 2
+  }
+  exec "$ENGINE_TEST_PY" "$@"
 fi
 
 # Default: launch UI (unchanged)
