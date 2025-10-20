@@ -1,3 +1,10 @@
 .DS_Store
 *.swp
 *.DS_Store?
+.DS_Store
+__pycache__/
+*.pyc
+
+# DO NOT COMMIT real phone lists
+lists/*.csv
+!lists/sample.csv
