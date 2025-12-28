@@ -267,11 +267,35 @@ class TuiApp:
             return None
         return text.strip()
 
-    def contact_matches(self, contact: core.Contact, query: str) -> bool:
+    def fuzzy_score(self, needle: str, hay: str) -> int | None:
+        if not needle:
+            return 0
+        needle = needle.lower()
+        hay = hay.lower()
+        score = 0
+        last = -1
+        for ch in needle:
+            idx = hay.find(ch, last + 1)
+            if idx == -1:
+                return None
+            score += 3 if idx == last + 1 else 1
+            if idx == 0:
+                score += 2
+            last = idx
+        if needle in hay:
+            score += 4 + len(needle)
+        return score
+
+    def fuzzy_match_score(self, query: str, hay: str) -> int | None:
         if not query:
-            return True
-        hay = " ".join([contact.name, contact.number, " ".join(contact.aliases)]).lower()
-        return all(part in hay for part in query.lower().split())
+            return 0
+        total = 0
+        for part in query.lower().split():
+            score = self.fuzzy_score(part, hay)
+            if score is None:
+                return None
+            total += score
+        return total
 
     def draw_contact_row(
         self,
@@ -319,7 +343,20 @@ class TuiApp:
             width = min(78, cols - 6)
             win = self.make_overlay(height, width, title)
             inner_w = width - 4
-            filtered = [c for c in sorted_contacts if self.contact_matches(c, query)]
+            if query:
+                ranked: list[tuple[int, core.Contact]] = []
+                for contact in sorted_contacts:
+                    hay = " ".join(
+                        [contact.name, contact.number, " ".join(contact.aliases)]
+                    ).lower()
+                    score = self.fuzzy_match_score(query, hay)
+                    if score is None:
+                        continue
+                    ranked.append((score, contact))
+                ranked.sort(key=lambda pair: (-pair[0], pair[1].name.lower()))
+                filtered = [contact for _score, contact in ranked]
+            else:
+                filtered = sorted_contacts
             if idx >= len(filtered):
                 idx = max(0, len(filtered) - 1)
             max_rows = height - 4
@@ -403,6 +440,125 @@ class TuiApp:
                 offset = 0
                 continue
 
+    def list_picker(
+        self,
+        title: str,
+        entries: list[tuple[str, Path]],
+        multi: bool,
+    ) -> list[tuple[str, Path]] | tuple[str, Path] | None:
+        query = ""
+        idx = 0
+        offset = 0
+        selected: set[str] = set()
+        while True:
+            rows, cols = self.stdscr.getmaxyx()
+            height = min(12, rows - 4)
+            width = min(50, cols - 6)
+            win = self.make_overlay(height, width, title)
+            inner_w = width - 4
+            if query:
+                ranked: list[tuple[int, tuple[str, Path]]] = []
+                for label, path in entries:
+                    score = self.fuzzy_match_score(query, label)
+                    if score is None:
+                        continue
+                    ranked.append((score, (label, path)))
+                ranked.sort(key=lambda pair: (-pair[0], pair[1][0].lower()))
+                filtered = [item for _score, item in ranked]
+            else:
+                filtered = entries
+
+            if idx >= len(filtered):
+                idx = max(0, len(filtered) - 1)
+            max_rows = height - 4
+            max_offset = max(0, len(filtered) - max_rows)
+            if offset > max_offset:
+                offset = max_offset
+            if idx < offset:
+                offset = idx
+            if idx >= offset + max_rows:
+                offset = idx - max_rows + 1
+
+            filter_label = f"Filter: {query}" if query else "Filter: (type to search)"
+            self.safe_addstr(win, 1, 2, filter_label[:inner_w])
+            right = f"{len(filtered)}/{len(entries)}"
+            if multi:
+                right = f"Selected {len(selected)} | {right}"
+            if len(right) + 1 < inner_w:
+                self.safe_addstr(win, 1, width - 2 - len(right), right, curses.A_DIM)
+
+            if not filtered:
+                self.safe_addstr(win, 3, 2, "No matches.", curses.A_DIM)
+            else:
+                view = filtered[offset : offset + max_rows]
+                for i, (label, _path) in enumerate(view):
+                    active = (offset + i) == idx
+                    marker = ""
+                    if multi:
+                        marker = "[x] " if label in selected else "[ ] "
+                    line = f"{marker}{label}"
+                    attr = curses.A_REVERSE if active else curses.A_NORMAL
+                    self.safe_addstr(win, 2 + i, 2, line[:inner_w], attr)
+                if offset > 0:
+                    self.safe_addstr(win, 2, width - 3, "^", curses.A_DIM)
+                if offset + max_rows < len(filtered):
+                    self.safe_addstr(win, 2 + max_rows - 1, width - 3, "v", curses.A_DIM)
+
+            if multi:
+                footer = "Space toggle | Enter confirm | Esc back"
+            else:
+                footer = "Enter select | Esc back"
+            self.safe_addstr(win, height - 2, 2, footer[:inner_w], curses.A_DIM)
+            win.refresh()
+            ch = win.getch()
+            if ch == curses.KEY_RESIZE:
+                self.handle_resize()
+                continue
+            if ch in (curses.KEY_UP, ord("k")):
+                idx = max(0, idx - 1)
+                continue
+            if ch in (curses.KEY_DOWN, ord("j")):
+                idx = min(max(0, len(filtered) - 1), idx + 1)
+                continue
+            if ch in (10, 13):
+                if not filtered:
+                    continue
+                if multi:
+                    if not selected:
+                        label, _path = filtered[idx]
+                        return [(label, _path)]
+                    return [(label, path) for label, path in entries if label in selected]
+                return filtered[idx]
+            if ch == 27:
+                return None
+            if ch in (curses.KEY_BACKSPACE, 127, 8):
+                query = query[:-1]
+                idx = 0
+                offset = 0
+                continue
+            if ch == ord(" ") and multi and filtered:
+                label, _path = filtered[idx]
+                if label in selected:
+                    selected.remove(label)
+                else:
+                    selected.add(label)
+                continue
+            if 32 <= ch < 127 and ch != ord(" "):
+                query += chr(ch)
+                idx = 0
+                offset = 0
+                continue
+
+    def summarize_labels(self, labels: list[str], max_len: int = 36) -> str:
+        if not labels:
+            return "none"
+        joined = ", ".join(labels)
+        if len(joined) <= max_len:
+            return joined
+        if len(labels) == 1:
+            return labels[0][:max_len]
+        return f"{labels[0]} +{len(labels) - 1} more"
+
     def select_list(self, entries: list[tuple[str, Path]]) -> tuple[str, Path] | None:
         height = min(12, len(entries) + 4)
         width = 40
@@ -452,8 +608,12 @@ class TuiApp:
             width = min(78, cols - 6)
             win = self.make_overlay(height, width, "Preview")
             y = 2
-            self.safe_addstr(win, y, 2, f"List: {list_label}")
-            y += 1
+            list_line = f"Lists: {list_label}"
+            for line in textwrap.wrap(list_line, width - 4):
+                if y >= height - 4:
+                    break
+                self.safe_addstr(win, y, 2, line)
+                y += 1
             names = ", ".join(c.name for c in resolved)
             for line in textwrap.wrap(f"Recipients ({len(resolved)}): {names}", width - 4):
                 if y >= height - 4:
@@ -521,29 +681,61 @@ class TuiApp:
 
     def send_flow(self) -> None:
         entries = core.list_entries()
-        selected = self.select_list(entries)
-        if not selected:
+        picked = self.list_picker("Select list(s)", entries, multi=True)
+        if not picked:
             return
-        list_label, list_path = selected
-        win = self.make_overlay(8, 72, "Recipients")
-        self.safe_addstr(win, 2, 2, "To (comma or space separated):")
-        recipients = self.input_line(win, 3, 2, 66)
-        if recipients is None or not recipients.strip():
+        picked_entries = [picked] if isinstance(picked, tuple) else picked
+        list_labels = [label for label, _path in picked_entries]
+        list_label = self.summarize_labels(list_labels)
+
+        contacts: list[core.Contact] = []
+        for _label, list_path in picked_entries:
+            try:
+                contacts.extend(core.load_contacts(list_path))
+            except FileNotFoundError as exc:
+                self.show_message("Missing list", str(exc))
+                return
+
+        contacts = core.dedup(contacts)
+        if not contacts:
+            self.show_message("Empty list", "Selected list(s) have no entries.")
             return
+
+        missing: list[str] = []
+        mode = self.overlay_menu(
+            "Recipients",
+            [
+                ("All from list(s)", "all"),
+                ("Pick people", "pick"),
+                ("Manual entry", "manual"),
+                ("Back", None),
+            ],
+        )
+        if mode is None:
+            return
+        if mode == "all":
+            resolved = contacts
+        elif mode == "pick":
+            chosen = self.contact_browser("Pick recipients", contacts, selectable=True)
+            if not chosen:
+                return
+            resolved = core.dedup(chosen)
+        elif mode == "manual":
+            win = self.make_overlay(8, 72, "Recipients")
+            self.safe_addstr(win, 2, 2, "Names (comma or space separated):")
+            recipients = self.input_line(win, 3, 2, 66)
+            if recipients is None or not recipients.strip():
+                return
+            tokens = core.tokenize_names(recipients)
+            resolved, missing = core.resolve_tokens(tokens, contacts)
+            if not resolved:
+                self.show_message("No recipients", "No recipients matched your input.")
+                return
+        else:
+            return
+
         message = self.input_multiline("Compose message")
         if message is None or not message.strip():
-            return
-
-        try:
-            contacts = core.load_contacts(list_path)
-        except FileNotFoundError as exc:
-            self.show_message("Error", str(exc))
-            return
-
-        tokens = core.tokenize_names(recipients)
-        resolved, missing = core.resolve_tokens(tokens, contacts)
-        if not resolved:
-            self.show_message("No recipients", "No recipients matched your input.")
             return
 
         normalized = core.normalize_message(message)
@@ -723,11 +915,11 @@ class TuiApp:
 
     def show_help(self) -> None:
         lines = [
-            "Send: select list, type recipients, write message, preview, send.",
+            "Send: choose list(s), then pick people or use full lists.",
             "Lists: preview, add, or remove names and numbers.",
-            "Recipients: comma or space separated; use aliases if set.",
+            "Pickers: type to fuzzy-filter; Space toggles selection.",
+            "Recipients: manual entry supports comma or space separated names.",
             "Message: Ctrl+D to finish, Esc to cancel.",
-            "List browser: type to filter; Space toggles selection in remove.",
             "Keys: arrows or j/k to move, Enter to select, Esc to go back.",
         ]
         while True:
