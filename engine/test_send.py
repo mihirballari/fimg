@@ -26,20 +26,34 @@ def read_key():
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
     return ch
 
+def strip_skip_flag(argv):
+    skip = False
+    cleaned = []
+    in_message = False
+    for tok in argv[1:]:
+        if not in_message and tok == "-skip":
+            skip = True
+            continue
+        if not in_message and ":" in tok:
+            in_message = True
+        cleaned.append(tok)
+    return skip, cleaned
+
 def parse_cli(argv):
-    if len(argv) < 2:
-        raise SystemExit("Usage: test_send.py to <targets> : <message>")
-    raw = " ".join(argv[1:])
+    skip, rest = strip_skip_flag(argv)
+    if len(rest) < 1:
+        raise SystemExit("Usage: test_send.py [-skip] to <targets> : <message>")
+    raw = " ".join(rest)
     # accept "to bay : yo" or "to bay: yo"
     if raw.startswith("to "):
         raw = raw[3:]
     if ":" not in raw:
-        raise SystemExit("Usage: test_send.py to <targets> : <message>")
+        raise SystemExit("Usage: test_send.py [-skip] to <targets> : <message>")
     # normalize single colon split (with or without spaces around)
     parts = raw.split(":", 1)
     targets = parts[0].strip().strip('"').strip("'")
     message = parts[1].strip().replace("\\n", "\n")
-    return targets, message
+    return targets, message, skip
 
 def load_entries():
     entries = []
@@ -157,14 +171,14 @@ def send_with_spinner(name, handle, message):
         return False, status
 
 def main():
-    targets_str, msg = parse_cli(sys.argv)
+    targets_str, msg, skip_confirm = parse_cli(sys.argv)
     entries = load_entries()
     resolved = resolve_targets(targets_str, entries)
     if not resolved:
         print("[fimg] no recipients resolved"); sys.exit(3)
 
     names = [r[0] for r in resolved]
-    if not box_preview(msg, names):
+    if not skip_confirm and not box_preview(msg, names):
         print("[fimg] cancelled"); sys.exit(0)
 
     print(BLUE + BOLD + "Sending…" + RST)
@@ -182,4 +196,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -6,6 +6,11 @@ DIM="\033[2m"
 RST="\033[0m"
 
 preview_and_confirm() {
+  local skip=0
+  if [ "${1-}" = "-skip" ]; then
+    skip=1
+    shift
+  fi
   local message="$1"
   shift
   local recipients=("$@")
@@ -30,6 +35,9 @@ preview_and_confirm() {
   printf '\n'
   printf '%b%s%b\n' "$BOLD" "send to:" "$RST"
   printf '%s\n\n' "$(printf '%s ' "${recipients[@]}")"
+  if [ "$skip" -eq 1 ]; then
+    return 0
+  fi
   printf '%b%s%b' "$DIM" "Press Enter to send; any other key to cancel..." "$RST"
   local k
   k="$(term_read_key)"

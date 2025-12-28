@@ -18,9 +18,9 @@ AS_PATH = ENGINE / "send_imessage.applescript"
 
 USAGE = (
     "Usage:\n"
-    "  fimg c [all|actives|brothers|pledges] to NAME1 NAME2 : MESSAGE\n"
-    "  fimg c [all|actives|brothers|pledges] NAME1 NAME2 : MESSAGE\n"
-    "  fimg c to NAME1 NAME2 : MESSAGE   # defaults to list = 'all'\n"
+    "  fimg -c [-skip] [all|actives|brothers|pledges] to NAME1 NAME2 : MESSAGE\n"
+    "  fimg -c [-skip] [all|actives|brothers|pledges] NAME1 NAME2 : MESSAGE\n"
+    "  fimg -c [-skip] to NAME1 NAME2 : MESSAGE   # defaults to list = 'all'\n"
 )
 
 # -------------------- utils --------------------
@@ -92,6 +92,19 @@ def parse(rest):
             parts.extend(shlex.split(chunk))
     tokens = [t for t in parts if t]
     return tokens, message
+
+def strip_skip_flag(argv):
+    skip = False
+    cleaned = []
+    in_message = False
+    for tok in argv:
+        if not in_message and tok == "-skip":
+            skip = True
+            continue
+        if not in_message and ":" in tok:
+            in_message = True
+        cleaned.append(tok)
+    return skip, cleaned
 
 def resolve(tokens, contacts):
     if any(t.lower() == "all" for t in tokens):
@@ -176,6 +189,7 @@ def confirm():
 
 def main():
     argv = sys.argv[1:]
+    skip_confirm, argv = strip_skip_flag(argv)
     list_key = "all"
     rest = argv
     if argv and argv[0].lower() in CSV_MAP:
@@ -205,7 +219,7 @@ def main():
     print(message)
     print()
 
-    if not confirm():
+    if not skip_confirm and not confirm():
         print("Canceled."); return
 
     if not AS_PATH.exists():
@@ -231,4 +245,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

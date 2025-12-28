@@ -28,9 +28,10 @@ Usage:
   fimg -r
       FULL reload: chmod +x *.sh/*.py; relink /usr/local/bin/fimg; refresh command cache.
 
-  fimg -c [all|actives|brothers|pledges] to <names> : <message>
-  fimg -c [all|actives|brothers|pledges] <names> : <message>
-      CLI send (no UI). Examples:  fimg -c to bay: yo   |  fimg -c pledges to all: hi
+  fimg -c [-skip] [all|actives|brothers|pledges] to <names> : <message>
+  fimg -c [-skip] [all|actives|brothers|pledges] <names> : <message>
+      CLI send (no UI). Use -skip to bypass Enter-to-send prompt for scripting.
+      Examples:  fimg -c to bay: yo   |  fimg -c pledges to all: hi
 
   fimg -e r <list|path>      # remove entries (Tab-complete names; Enter=go, any other key=cancel)
   fimg -e a <list|path>      # add a single entry (name → number → alias)
