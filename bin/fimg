@@ -15,10 +15,9 @@ resolve_dir() {
 SCRIPT_DIR=$(resolve_dir "$0")
 ROOT_DIR=$(cd -P -- "$SCRIPT_DIR/.." && pwd)
 
-ENGINE_TEST_PY="$ROOT_DIR/engine/test_send.py"
 BLAST_PY="$ROOT_DIR/engine/blast.py"
 EDIT_PY="$ROOT_DIR/engine/edit_list.py"
-UI_LAUNCH="$ROOT_DIR/ui/landing.sh"
+UI_LAUNCH="$ROOT_DIR/ui/tui.py"
 
 print_help() {
   cat <<EOF
@@ -43,7 +42,7 @@ EOF
 }
 
 # --- no args: launch UI
-[ $# -eq 0 ] && exec "$UI_LAUNCH"
+[ $# -eq 0 ] && exec python3 "$UI_LAUNCH"
 
 case "${1-}" in
 -h | --help)
@@ -85,6 +84,6 @@ case "${1-}" in
   ;;
 *)
   # anything else launches UI (prevents accidental editor invocation)
-  exec "$UI_LAUNCH" "$@"
+  exec python3 "$UI_LAUNCH" "$@"
   ;;
 esac
