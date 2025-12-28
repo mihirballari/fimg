@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import re
 import shlex
 import subprocess
@@ -91,6 +92,41 @@ def load_contacts(csv_path: Path) -> List[Contact]:
                 )
             )
     return contacts
+
+
+def make_contact(name: str, number: str, alias_raw: str = "") -> Contact:
+    aliases = (
+        tuple(a.lower() for a in re.split(r"[,\s;/]+", alias_raw) if a.strip())
+        if alias_raw
+        else ()
+    )
+    name_norm = _norm(name)
+    return Contact(
+        name=name.strip(),
+        first=first_name(name),
+        number=number,
+        name_l=name_norm,
+        aliases=aliases,
+    )
+
+
+def write_contacts(csv_path: Path, contacts: List[Contact]) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = csv_path.with_suffix(csv_path.suffix + ".tmp")
+    with open(tmp, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["name", "number", "alias"])
+        writer.writeheader()
+        for contact in sorted(contacts, key=lambda c: c.name.lower()):
+            writer.writerow(
+                {
+                    "name": contact.name,
+                    "number": contact.number,
+                    "alias": ",".join(contact.aliases),
+                }
+            )
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, csv_path)
 
 
 def dedup(people: Iterable[Contact]) -> List[Contact]:
