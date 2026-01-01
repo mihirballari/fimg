@@ -36,6 +36,7 @@ class TuiApp:
         self.banner_lines = self._load_banner()
         self.running = True
         self.needs_redraw = False
+        self.overlay_rect: tuple[int, int, int, int] | None = None
 
     def _load_banner(self) -> list[str]:
         if not BANNER_PATH.exists():
@@ -48,6 +49,8 @@ class TuiApp:
         curses.cbreak()
         self.stdscr.keypad(True)
         self.stdscr.nodelay(True)
+        if hasattr(curses, "set_escdelay"):
+            curses.set_escdelay(25)
         if curses.has_colors():
             curses.start_color()
             curses.use_default_colors()
@@ -85,6 +88,22 @@ class TuiApp:
             self.safe_addstr(self.stdscr, y, 0, fill, curses.A_DIM)
         self.stdscr.refresh()
 
+    def draw_overlay_footer(self, text: str) -> None:
+        if not text or not self.overlay_rect:
+            return
+        top, left, height, width = self.overlay_rect
+        rows, cols = self.stdscr.getmaxyx()
+        footer_y = top + height
+        if footer_y >= rows:
+            return
+        inner_w = max(0, min(width - 4, cols - left - 2))
+        if inner_w <= 0:
+            return
+        label = text[:inner_w]
+        pad = " " * (inner_w - len(label))
+        self.safe_addstr(self.stdscr, footer_y, left + 2, label + pad, curses.A_DIM)
+        self.stdscr.refresh()
+
     def handle_resize(self) -> None:
         try:
             curses.resize_term(0, 0)
@@ -109,6 +128,9 @@ class TuiApp:
                     continue
                 if ch == curses.KEY_RESIZE:
                     self.handle_resize()
+                    continue
+                if ch == 27:
+                    self.quit_app()
                     continue
                 if ch in (curses.KEY_UP, ord("k")):
                     self.menu_idx = max(0, self.menu_idx - 1)
@@ -163,7 +185,7 @@ class TuiApp:
             else:
                 self.safe_addstr(self.stdscr, menu_top + i, menu_left, line)
 
-        hint = "s send  l lists  h help  q quit"
+        hint = "Use ^/v or j/k to navigate, Enter to select, q/esc to quit"
         self.safe_addstr(
             self.stdscr,
             rows - 2,
@@ -190,6 +212,7 @@ class TuiApp:
         width = min(width, cols - 2)
         top = max(0, (rows - height) // 2)
         left = max(0, (cols - width) // 2)
+        self.overlay_rect = (top, left, height, width)
         self.draw_scrim()
         self.draw_shadow(top, left, height, width)
         win = curses.newwin(height, width, top, left)
@@ -235,7 +258,7 @@ class TuiApp:
         height = min(16, rows - 4)
         width = min(72, cols - 6)
         win = self.make_overlay(height, width, title)
-        self.safe_addstr(win, 1, 2, "Ctrl+D finish | Esc cancel", curses.A_DIM)
+        self.draw_overlay_footer("Ctrl+D finish | Esc cancel")
         edit_h = height - 4
         edit_w = width - 4
         edit_win = win.derwin(edit_h, edit_w, 2, 2)
@@ -401,8 +424,8 @@ class TuiApp:
             footer = "Esc back"
             if selectable:
                 footer = "Space toggle | Enter confirm | Esc back"
-            self.safe_addstr(win, height - 2, 2, footer[:inner_w], curses.A_DIM)
             win.refresh()
+            self.draw_overlay_footer(footer)
             ch = win.getch()
             if ch == curses.KEY_RESIZE:
                 self.handle_resize()
@@ -508,8 +531,8 @@ class TuiApp:
                 footer = "Space toggle | Enter confirm | Esc back"
             else:
                 footer = "Enter select | Esc back"
-            self.safe_addstr(win, height - 2, 2, footer[:inner_w], curses.A_DIM)
             win.refresh()
+            self.draw_overlay_footer(footer)
             ch = win.getch()
             if ch == curses.KEY_RESIZE:
                 self.handle_resize()
@@ -580,8 +603,8 @@ class TuiApp:
                     self.safe_addstr(win, 1, width - 3, "^", curses.A_DIM)
                 if offset + max_rows < len(entries):
                     self.safe_addstr(win, height - 3, width - 3, "v", curses.A_DIM)
-                self.safe_addstr(win, height - 2, 2, "Enter select | Esc back", curses.A_DIM)
                 win.refresh()
+                self.draw_overlay_footer("Enter select | Esc back")
                 ch = win.getch()
                 if ch in (curses.KEY_UP, ord("k")):
                     idx = max(0, idx - 1)
@@ -637,8 +660,8 @@ class TuiApp:
                 if y >= height - 3:
                     break
 
-            self.safe_addstr(win, height - 2, 2, "Enter send | Esc cancel", curses.A_DIM)
             win.refresh()
+            self.draw_overlay_footer("Enter send | Esc cancel")
             ch = win.getch()
             if ch == curses.KEY_RESIZE:
                 self.handle_resize()
@@ -669,8 +692,8 @@ class TuiApp:
                 win.scroll(1)
                 y = height - 3
             time.sleep(0.1)
-        self.safe_addstr(win, height - 2, 2, "Done. Press any key.", curses.A_DIM)
         win.refresh()
+        self.draw_overlay_footer("Done. Press any key.")
         while True:
             ch = win.getch()
             if ch == curses.KEY_RESIZE:
@@ -783,8 +806,8 @@ class TuiApp:
                     self.safe_addstr(win, 1, width - 3, "^", curses.A_DIM)
                 if offset + max_rows < len(options):
                     self.safe_addstr(win, height - 3, width - 3, "v", curses.A_DIM)
-                self.safe_addstr(win, height - 2, 2, "Enter select | Esc back", curses.A_DIM)
                 win.refresh()
+                self.draw_overlay_footer("Enter select | Esc back")
                 ch = win.getch()
                 if ch in (curses.KEY_UP, ord("k")):
                     idx = max(0, idx - 1)
@@ -905,8 +928,8 @@ class TuiApp:
             win = self.make_overlay(7, width, title)
             for i, line in enumerate(textwrap.wrap(body, width - 4)[:3]):
                 self.safe_addstr(win, 2 + i, 2, line)
-            self.safe_addstr(win, 5, 2, "Press any key.", curses.A_DIM)
             win.refresh()
+            self.draw_overlay_footer("Press any key.")
             ch = win.getch()
             if ch == curses.KEY_RESIZE:
                 self.handle_resize()
@@ -928,8 +951,8 @@ class TuiApp:
             win = self.make_overlay(height, width, "Help")
             for i, line in enumerate(lines):
                 self.safe_addstr(win, 2 + i, 2, line)
-            self.safe_addstr(win, height - 2, 2, "Press any key.", curses.A_DIM)
             win.refresh()
+            self.draw_overlay_footer("Press any key.")
             ch = win.getch()
             if ch == curses.KEY_RESIZE:
                 self.handle_resize()
