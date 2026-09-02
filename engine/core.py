@@ -70,10 +70,15 @@ def load_contacts(csv_path: Path) -> List[Contact]:
     contacts: List[Contact] = []
     with open(csv_path, newline="") as f:
         reader = csv.DictReader(f)
-        for row in reader:
-            name = (row.get("name") or row.get("Name") or "").strip()
-            raw = (row.get("number") or row.get("Number") or row.get("Phone") or "").strip()
-            alias_raw = (row.get("alias") or row.get("Alias") or "").strip()
+        for row_raw in reader:
+            row = {
+                (k or "").strip().lower(): (v or "").strip()
+                for k, v in row_raw.items()
+                if (k or "").strip()
+            }
+            name = row.get("name", "")
+            raw = row.get("number") or row.get("phone") or ""
+            alias_raw = row.get("alias", "")
             if not name or not raw:
                 continue
             number = re.sub(r"[^\d+]", "", raw)

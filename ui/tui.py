@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import curses
-import curses.textpad
+import math
 import re
 import textwrap
 import time
 import signal
 import sys
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,7 @@ class TuiApp:
         curses.curs_set(0)
         curses.noecho()
         curses.cbreak()
+        curses.nonl()
         self.stdscr.keypad(True)
         self.stdscr.nodelay(True)
         if hasattr(curses, "set_escdelay"):
@@ -74,6 +76,13 @@ class TuiApp:
                 win.addstr(y, x, text)
         except curses.error:
             pass
+
+    def is_nav_up(self, ch: int) -> bool:
+        """Treat arrows/ctrl+n/p/ctrl+k as navigation; leave letters (j/k) for typing."""
+        return ch in (curses.KEY_UP, curses.KEY_SR, curses.KEY_PPAGE, 16, 11)  # 16 = Ctrl+P, 11 = Ctrl+K
+
+    def is_nav_down(self, ch: int) -> bool:
+        return ch in (curses.KEY_DOWN, curses.KEY_SF, curses.KEY_NPAGE, 14, 10)  # 14 = Ctrl+N, 10 = Ctrl+J
 
     def set_cursor(self, visible: bool) -> None:
         try:
@@ -132,16 +141,16 @@ class TuiApp:
                 if ch == 27:
                     self.quit_app()
                     continue
-                if ch in (curses.KEY_UP, ord("k")):
+                if ch in (curses.KEY_UP, ord("k"), 11):
                     self.menu_idx = max(0, self.menu_idx - 1)
                     self.draw_landing()
                     continue
-                if ch in (curses.KEY_DOWN, ord("j")):
+                if ch in (curses.KEY_DOWN, ord("j"), 10):
                     self.menu_idx = min(len(self.menu_items) - 1, self.menu_idx + 1)
                     self.draw_landing()
                     continue
 
-                if ch in (10, 13):
+                if ch in (10, 13, curses.KEY_ENTER):
                     _, _, action = self.menu_items[self.menu_idx]
                     action()
                     self.draw_landing()
@@ -185,7 +194,7 @@ class TuiApp:
             else:
                 self.safe_addstr(self.stdscr, menu_top + i, menu_left, line)
 
-        hint = "Use ^/v or j/k to navigate, Enter to select, q/esc to quit"
+        hint = "Use ^/v or j/k/Ctrl+j/k to navigate, Enter to select, q/esc to quit"
         self.safe_addstr(
             self.stdscr,
             rows - 2,
@@ -258,37 +267,194 @@ class TuiApp:
         height = min(16, rows - 4)
         width = min(72, cols - 6)
         win = self.make_overlay(height, width, title)
-        self.draw_overlay_footer("Ctrl+D finish | Esc cancel")
+        self.draw_overlay_footer("Enter newline | Ctrl+D finish | Esc cancel")
         edit_h = height - 4
         edit_w = width - 4
         edit_win = win.derwin(edit_h, edit_w, 2, 2)
-        if initial:
-            for i, line in enumerate(initial.splitlines()[:edit_h]):
-                self.safe_addstr(edit_win, i, 0, line[:edit_w - 1])
+        edit_win.keypad(True)
 
-        canceled = {"flag": False}
+        # Buffer: list of logical lines (no embedded \n)
+        buf: list[str] = initial.split("\n") if initial else [""]
+        cy: int = len(buf) - 1
+        cx: int = len(buf[cy])
+        scroll: int = 0
 
-        def validator(ch: int) -> int:
-            if ch == 27:
-                canceled["flag"] = True
-                return 7
-            if ch == curses.KEY_RESIZE:
-                canceled["flag"] = True
-                self.handle_resize()
-                return 7
-            if ch == 4:
-                return 7
-            return ch
+        def compute_vrows() -> list[tuple[int, int]]:
+            """Map logical lines to visual rows: [(line_idx, col_offset), ...]."""
+            vrows: list[tuple[int, int]] = []
+            for li, line in enumerate(buf):
+                if not line:
+                    vrows.append((li, 0))
+                else:
+                    n = math.ceil(len(line) / edit_w)
+                    for k in range(n):
+                        vrows.append((li, k * edit_w))
+                    # Extra row when cursor sits at end of a full last chunk
+                    if len(line) % edit_w == 0:
+                        vrows.append((li, len(line)))
+            return vrows
 
-        box = curses.textpad.Textbox(edit_win)
+        def cur_vrow(vrows: list[tuple[int, int]]) -> int:
+            """Find the visual row the cursor is on."""
+            result = 0
+            for vi, (li, co) in enumerate(vrows):
+                if li == cy and co <= cx:
+                    result = vi
+            return result
+
+        def render() -> None:
+            nonlocal scroll
+            vrows = compute_vrows()
+            cv = cur_vrow(vrows)
+            # Adjust scroll to keep cursor visible
+            if cv < scroll:
+                scroll = cv
+            if cv >= scroll + edit_h:
+                scroll = cv - edit_h + 1
+            edit_win.erase()
+            for vi in range(scroll, min(scroll + edit_h, len(vrows))):
+                li, co = vrows[vi]
+                chunk = buf[li][co : co + edit_w]
+                screen_y = vi - scroll
+                if screen_y < edit_h:
+                    self.safe_addstr(edit_win, screen_y, 0, chunk)
+            # Position cursor
+            screen_y = cv - scroll
+            li, co = vrows[cv]
+            screen_x = cx - co
+            try:
+                edit_win.move(screen_y, screen_x)
+            except curses.error:
+                pass
+            edit_win.refresh()
+
         self.set_cursor(True)
         try:
-            text = box.edit(validator)
+            render()
+            while True:
+                ch = edit_win.getch()
+
+                # Finish
+                if ch == 4:  # Ctrl+D
+                    break
+
+                # Cancel
+                if ch == 27:
+                    return None
+                if ch == curses.KEY_RESIZE:
+                    return None
+
+                # Printable character
+                if 32 <= ch < 127:
+                    buf[cy] = buf[cy][:cx] + chr(ch) + buf[cy][cx:]
+                    cx += 1
+                    render()
+                    continue
+
+                # Enter — split line
+                if ch in (curses.KEY_ENTER, 10, 13):
+                    rest = buf[cy][cx:]
+                    buf[cy] = buf[cy][:cx]
+                    cy += 1
+                    buf.insert(cy, rest)
+                    cx = 0
+                    render()
+                    continue
+
+                # Backspace
+                if ch in (curses.KEY_BACKSPACE, 127, 8):
+                    if cx > 0:
+                        buf[cy] = buf[cy][: cx - 1] + buf[cy][cx:]
+                        cx -= 1
+                    elif cy > 0:
+                        cx = len(buf[cy - 1])
+                        buf[cy - 1] += buf[cy]
+                        buf.pop(cy)
+                        cy -= 1
+                    render()
+                    continue
+
+                # Delete
+                if ch == curses.KEY_DC:
+                    if cx < len(buf[cy]):
+                        buf[cy] = buf[cy][:cx] + buf[cy][cx + 1 :]
+                    elif cy < len(buf) - 1:
+                        buf[cy] += buf[cy + 1]
+                        buf.pop(cy + 1)
+                    render()
+                    continue
+
+                # Left arrow
+                if ch == curses.KEY_LEFT:
+                    if cx > 0:
+                        cx -= 1
+                    elif cy > 0:
+                        cy -= 1
+                        cx = len(buf[cy])
+                    render()
+                    continue
+
+                # Right arrow
+                if ch == curses.KEY_RIGHT:
+                    if cx < len(buf[cy]):
+                        cx += 1
+                    elif cy < len(buf) - 1:
+                        cy += 1
+                        cx = 0
+                    render()
+                    continue
+
+                # Up arrow
+                if ch == curses.KEY_UP:
+                    vrows = compute_vrows()
+                    cv = cur_vrow(vrows)
+                    screen_x = cx - vrows[cv][1]
+                    if cv > 0:
+                        li, co = vrows[cv - 1]
+                        cy = li
+                        # Length of this visual row's chunk
+                        next_co = vrows[cv][1] if vrows[cv][0] == li else len(buf[li])
+                        max_x = next_co - co
+                        cx = co + min(screen_x, max_x)
+                        cx = min(cx, len(buf[cy]))
+                    render()
+                    continue
+
+                # Down arrow
+                if ch == curses.KEY_DOWN:
+                    vrows = compute_vrows()
+                    cv = cur_vrow(vrows)
+                    screen_x = cx - vrows[cv][1]
+                    if cv < len(vrows) - 1:
+                        li, co = vrows[cv + 1]
+                        cy = li
+                        # Find end of this visual row
+                        if cv + 2 < len(vrows) and vrows[cv + 2][0] == li:
+                            max_x = vrows[cv + 2][1] - co
+                        else:
+                            max_x = len(buf[li]) - co
+                        cx = co + min(screen_x, max_x)
+                        cx = min(cx, len(buf[cy]))
+                    render()
+                    continue
+
+                # Home / Ctrl+A
+                if ch in (curses.KEY_HOME, 1):
+                    cx = 0
+                    render()
+                    continue
+
+                # End / Ctrl+E
+                if ch in (curses.KEY_END, 5):
+                    cx = len(buf[cy])
+                    render()
+                    continue
+
         finally:
             self.set_cursor(False)
-        if canceled["flag"]:
-            return None
-        return text.strip()
+
+        result = "\n".join(buf).rstrip("\n")
+        return result if result else None
 
     def fuzzy_score(self, needle: str, hay: str) -> int | None:
         if not needle:
@@ -348,6 +514,12 @@ class TuiApp:
         self.safe_addstr(win, y, x, f"{marker}{name_part}", row_attr)
         if meta_part:
             self.safe_addstr(win, y, x + len(marker) + name_w + 1, meta_part, meta_attr)
+
+    def contact_short_name(self, contact: core.Contact) -> str:
+        parts = contact.name.split()
+        if len(parts) >= 2:
+            return f"{parts[0]} {parts[-1]}"
+        return contact.name
 
     def contact_browser(
         self,
@@ -421,22 +593,22 @@ class TuiApp:
                 if offset + max_rows < len(filtered):
                     self.safe_addstr(win, 2 + max_rows - 1, width - 3, "v", curses.A_DIM)
 
-            footer = "Esc back"
+            footer = "Arrows/Ctrl+N/P/Ctrl+J/K move | Esc back"
             if selectable:
-                footer = "Space toggle | Enter confirm | Esc back"
+                footer = "Arrows/Ctrl+N/P/Ctrl+J/K move | Space toggle | Enter confirm | Esc back"
             win.refresh()
             self.draw_overlay_footer(footer)
             ch = win.getch()
             if ch == curses.KEY_RESIZE:
                 self.handle_resize()
                 continue
-            if ch in (curses.KEY_UP, ord("k")):
+            if self.is_nav_up(ch):
                 idx = max(0, idx - 1)
                 continue
-            if ch in (curses.KEY_DOWN, ord("j")):
+            if self.is_nav_down(ch):
                 idx = min(max(0, len(filtered) - 1), idx + 1)
                 continue
-            if ch in (10, 13):
+            if ch in (10, 13, curses.KEY_ENTER):
                 if not selectable:
                     return None
                 if not selected_numbers:
@@ -473,12 +645,37 @@ class TuiApp:
         idx = 0
         offset = 0
         selected: set[str] = set()
+        preview_cache: dict[str, list[str]] = {}
+
+        def get_preview(label: str, path: Path) -> list[str]:
+            if label in preview_cache:
+                return preview_cache[label]
+            try:
+                contacts = core.load_contacts(path)
+            except FileNotFoundError:
+                preview_cache[label] = ["(missing list)"]
+                return preview_cache[label]
+            if not contacts:
+                preview_cache[label] = ["(no recipients)"]
+                return preview_cache[label]
+            preview_cache[label] = [self.contact_short_name(c) for c in contacts]
+            return preview_cache[label]
+
+        title_base = title or "Filter Recipients"
         while True:
             rows, cols = self.stdscr.getmaxyx()
-            height = min(12, rows - 4)
-            width = min(50, cols - 6)
-            win = self.make_overlay(height, width, title)
+            height = min(16, rows - 4)
+            width = min(cols - 4, max(62, cols - 10))
             inner_w = width - 4
+            gap = 2
+            preview_w = max(16, min(24, inner_w // 3))
+            list_w = inner_w - preview_w - gap
+            if list_w < 18:
+                preview_w = max(12, preview_w - (18 - list_w))
+                list_w = inner_w - preview_w - gap
+            if preview_w < 12:
+                preview_w = 0
+                list_w = inner_w
             if query:
                 ranked: list[tuple[int, tuple[str, Path]]] = []
                 for label, path in entries:
@@ -502,16 +699,17 @@ class TuiApp:
             if idx >= offset + max_rows:
                 offset = idx - max_rows + 1
 
-            filter_label = f"Filter: {query}" if query else "Filter: (type to search)"
-            self.safe_addstr(win, 1, 2, filter_label[:inner_w])
-            right = f"{len(filtered)}/{len(entries)}"
-            if multi:
-                right = f"Selected {len(selected)} | {right}"
-            if len(right) + 1 < inner_w:
-                self.safe_addstr(win, 1, width - 2 - len(right), right, curses.A_DIM)
+            selection_label = f"{len(selected)}/{len(entries)}" if multi else f"{len(filtered)}/{len(entries)}"
+            hint = query if query else "type to search"
+            header = f"{title_base} | {selection_label} | {hint}"
+            win = self.make_overlay(height, width, header)
 
+            list_x = 2
+            preview_x = list_x + list_w + gap
             if not filtered:
-                self.safe_addstr(win, 3, 2, "No matches.", curses.A_DIM)
+                self.safe_addstr(win, 2, list_x, "No matches.".ljust(list_w), curses.A_DIM)
+                preview_label = "No list"
+                preview_lines = ["No selection"]
             else:
                 view = filtered[offset : offset + max_rows]
                 for i, (label, _path) in enumerate(view):
@@ -521,29 +719,53 @@ class TuiApp:
                         marker = "[x] " if label in selected else "[ ] "
                     line = f"{marker}{label}"
                     attr = curses.A_REVERSE if active else curses.A_NORMAL
-                    self.safe_addstr(win, 2 + i, 2, line[:inner_w], attr)
+                    self.safe_addstr(win, 2 + i, list_x, line[:list_w].ljust(list_w), attr)
                 if offset > 0:
-                    self.safe_addstr(win, 2, width - 3, "^", curses.A_DIM)
+                    self.safe_addstr(win, 2, list_x + list_w - 1, "^", curses.A_DIM)
                 if offset + max_rows < len(filtered):
-                    self.safe_addstr(win, 2 + max_rows - 1, width - 3, "v", curses.A_DIM)
+                    self.safe_addstr(win, 2 + max_rows - 1, list_x + list_w - 1, "v", curses.A_DIM)
+                preview_label, preview_path = filtered[idx]
+                preview_lines = get_preview(preview_label, preview_path)
+
+            if preview_w >= 12 and height >= 6:
+                preview_h = height - 4
+                preview_win = win.derwin(preview_h, preview_w, 2, preview_x)
+                preview_win.box()
+                self.safe_addstr(
+                    preview_win,
+                    0,
+                    2,
+                    f" {preview_label} "[: max(0, preview_w - 4)],
+                )
+                inner_preview_w = preview_w - 4
+                inner_preview_h = preview_h - 2
+                for i in range(inner_preview_h):
+                    text = preview_lines[i] if i < len(preview_lines) else ""
+                    self.safe_addstr(
+                        preview_win,
+                        1 + i,
+                        2,
+                        text[:inner_preview_w].ljust(inner_preview_w),
+                    )
+                preview_win.refresh()
 
             if multi:
-                footer = "Space toggle | Enter confirm | Esc back"
+                footer = "Arrows/Ctrl+N/P/Ctrl+J/K move | Type to search | Space toggle | Enter confirm | Esc back"
             else:
-                footer = "Enter select | Esc back"
+                footer = "Arrows/Ctrl+N/P/Ctrl+J/K move | Type to search | Enter select | Esc back"
             win.refresh()
             self.draw_overlay_footer(footer)
             ch = win.getch()
             if ch == curses.KEY_RESIZE:
                 self.handle_resize()
                 continue
-            if ch in (curses.KEY_UP, ord("k")):
+            if self.is_nav_up(ch):
                 idx = max(0, idx - 1)
                 continue
-            if ch in (curses.KEY_DOWN, ord("j")):
+            if self.is_nav_down(ch):
                 idx = min(max(0, len(filtered) - 1), idx + 1)
                 continue
-            if ch in (10, 13):
+            if ch in (10, 13, curses.KEY_ENTER):
                 if not filtered:
                     continue
                 if multi:
@@ -606,11 +828,11 @@ class TuiApp:
                 win.refresh()
                 self.draw_overlay_footer("Enter select | Esc back")
                 ch = win.getch()
-                if ch in (curses.KEY_UP, ord("k")):
+                if self.is_nav_up(ch) or ch == ord("k"):
                     idx = max(0, idx - 1)
-                elif ch in (curses.KEY_DOWN, ord("j")):
+                elif self.is_nav_down(ch) or ch == ord("j"):
                     idx = min(len(entries) - 1, idx + 1)
-                elif ch in (10, 13):
+                elif ch in (10, 13, curses.KEY_ENTER):
                     return entries[idx]
                 elif ch == 27:
                     return None
@@ -624,74 +846,184 @@ class TuiApp:
         resolved: list[core.Contact],
         missing: list[str],
         message: str,
-    ) -> bool:
+    ) -> str:
         while True:
             rows, cols = self.stdscr.getmaxyx()
-            height = min(20, rows - 4)
-            width = min(78, cols - 6)
-            win = self.make_overlay(height, width, "Preview")
-            y = 2
-            list_line = f"Lists: {list_label}"
-            for line in textwrap.wrap(list_line, width - 4):
-                if y >= height - 4:
-                    break
-                self.safe_addstr(win, y, 2, line)
-                y += 1
-            names = ", ".join(c.name for c in resolved)
-            for line in textwrap.wrap(f"Recipients ({len(resolved)}): {names}", width - 4):
-                if y >= height - 4:
-                    break
-                self.safe_addstr(win, y, 2, line)
-                y += 1
-            if missing and y < height - 4:
-                self.safe_addstr(win, y, 2, "Unmatched (ignored): " + ", ".join(missing), curses.A_DIM)
-                y += 1
+            height = min(22, rows - 4)
+            width = min(96, cols - 6)
+            top = max(0, (rows - height) // 2)
+            left = max(0, (cols - width) // 2)
+            self.overlay_rect = (top, left, height, width)
+            self.draw_scrim()
+            self.draw_shadow(top, left, height, width)
+            win = curses.newwin(height, width, top, left)
 
-            y += 1
-            if y < height - 3:
-                self.safe_addstr(win, y, 2, "Message:", curses.A_BOLD)
-                y += 1
-            for line in message.splitlines() or ["(empty)"]:
-                for wrapped in textwrap.wrap(line, width - 4) or [""]:
-                    if y >= height - 3:
+            inner_h = height - 4
+            inner_w = width - 4
+            gap = 2
+            msg_w = max(26, int(inner_w * 0.6))
+            list_w = max(16, inner_w - msg_w - gap)
+            if list_w < 12:
+                list_w = 12
+                msg_w = inner_w - list_w - gap
+            msg_win = win.derwin(inner_h, msg_w, 2, 2)
+            list_win = win.derwin(inner_h, list_w, 2, 2 + msg_w + gap)
+            msg_win.box()
+            list_win.box()
+            self.safe_addstr(msg_win, 0, 2, " Message ")
+            list_hdr = f" {list_label} ({len(resolved)}) "
+            self.safe_addstr(list_win, 0, 2, list_hdr[: max(0, list_w - 3)])
+
+            # Message pane
+            msg_lines = message.split("\n")
+            if len(msg_lines) == 1 and msg_lines[0] == "":
+                msg_lines = ["(empty)"]
+            y = 1
+            for line in msg_lines:
+                for wrapped in textwrap.wrap(line, msg_w - 4) or [""]:
+                    if y >= inner_h - 1:
                         break
-                    self.safe_addstr(win, y, 2, wrapped)
+                    self.safe_addstr(msg_win, y, 2, wrapped)
                     y += 1
-                if y >= height - 3:
+                if y >= inner_h - 1:
                     break
+
+            # Recipients pane
+            for i, contact in enumerate(resolved):
+                if 1 + i >= inner_h - 1:
+                    break
+                label = self.contact_short_name(contact)
+                self.safe_addstr(list_win, 1 + i, 2, label[: list_w - 4])
 
             win.refresh()
-            self.draw_overlay_footer("Enter send | Esc cancel")
+            msg_win.refresh()
+            list_win.refresh()
+            self.draw_overlay_footer("Enter send | e edit | Esc cancel")
             ch = win.getch()
             if ch == curses.KEY_RESIZE:
                 self.handle_resize()
                 continue
-            return ch in (10, 13)
+            if ch in (10, 13):
+                return "send"
+            if ch in (ord("e"), ord("E")):
+                return "edit"
+            if ch == 27:
+                return "cancel"
 
     def send_messages(self, resolved: list[core.Contact], message: str) -> None:
+        SPINNER = ["|", "/", "-", "\\"]
+        BAR_FILL = "#"
+        BAR_EMPTY = "-"
+
         rows, cols = self.stdscr.getmaxyx()
-        height = min(rows - 4, max(10, len(resolved) + 6))
+        height = min(rows - 4, max(12, len(resolved) + 8))
         width = min(70, cols - 6)
         win = self.make_overlay(height, width, "Sending")
-        win.scrollok(True)
-        y = 2
-        self.safe_addstr(win, y, 2, f"Sending {len(resolved)} message(s)...")
-        y += 2
-        for contact in resolved:
-            per = core.personalize(message, contact.first)
-            self.safe_addstr(win, y, 2, f"-> {contact.name} ...")
-            win.refresh()
-            ok, detail = core.send_message(contact.number, per)
-            status = "OK" if ok else "FAIL"
-            info = f"{status} {contact.name}"
-            if detail:
-                info = f"{info} ({detail})"
-            self.safe_addstr(win, y, 2, info[: width - 4])
+
+        inner_h = height - 4
+        inner_w = width - 4
+        body = win.derwin(inner_h, inner_w, 2, 2)
+        body.scrollok(True)
+        if hasattr(body, "idlok"):
+            try:
+                body.idlok(True)
+            except curses.error:
+                pass
+
+        total = len(resolved)
+        bar_w = min(inner_w - 2, 40)
+        sent = 0
+        failed = 0
+        y = 0
+
+        def append(line: str, attr: int = 0) -> None:
+            nonlocal y
+            if y >= inner_h:
+                body.scroll(1)
+                y = inner_h - 1
+            self.safe_addstr(body, y, 0, line[: max(0, inner_w - 1)], attr)
             y += 1
-            if y >= height - 2:
-                win.scroll(1)
-                y = height - 3
-            time.sleep(0.1)
+            body.refresh()
+
+        def draw_progress() -> None:
+            done = sent + failed
+            frac = done / total if total else 1
+            filled = int(frac * bar_w)
+            bar = f"[{BAR_FILL * filled}{BAR_EMPTY * (bar_w - filled)}] {done}/{total}"
+            # Draw progress bar on the overlay border (bottom inner line)
+            self.safe_addstr(win, height - 2, 2, bar[: inner_w], curses.A_DIM)
+            win.refresh()
+
+        def spin_send(contact_name: str, send_fn: callable) -> tuple[bool, str]:
+            """Show a spinner on the current line while send_fn executes."""
+            nonlocal y
+            line_y = y
+            if line_y >= inner_h:
+                body.scroll(1)
+                line_y = inner_h - 1
+            # We don't increment y yet — we'll overwrite this line with the result
+            frame = 0
+            # Run the send in a thread so we can animate
+            result: list[tuple[bool, str]] = []
+
+            def worker() -> None:
+                result.append(send_fn())
+
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+            body.nodelay(True)
+            while t.is_alive():
+                spin_char = SPINNER[frame % len(SPINNER)]
+                status_line = f"  {spin_char} {contact_name}"
+                self.safe_addstr(body, line_y, 0, " " * (inner_w - 1))
+                self.safe_addstr(body, line_y, 0, status_line[: inner_w - 1])
+                body.refresh()
+                frame += 1
+                time.sleep(0.08)
+            body.nodelay(False)
+            t.join()
+            return result[0] if result else (False, "unknown error")
+
+        append(f"Sending {total} message(s)", curses.A_BOLD)
+        append("")
+        draw_progress()
+
+        for i, contact in enumerate(resolved):
+            per = core.personalize(message, contact.first)
+
+            ok, detail = spin_send(
+                contact.name,
+                lambda num=contact.number, msg=per: core.send_message(num, msg),
+            )
+
+            # Overwrite the spinner line with the result
+            if y >= inner_h:
+                result_y = inner_h - 1
+            else:
+                result_y = y
+            if ok:
+                sent += 1
+                tag = "[SENT]"
+            else:
+                failed += 1
+                tag = "[FAIL]"
+            result_line = f"  {tag} {contact.name}"
+            if detail:
+                result_line += f" ({detail})"
+            self.safe_addstr(body, result_y, 0, " " * (inner_w - 1))
+            self.safe_addstr(body, result_y, 0, result_line[: inner_w - 1])
+            y = result_y + 1
+            body.refresh()
+            draw_progress()
+
+        # Summary line
+        append("")
+        if failed == 0:
+            summary = f"All {sent} message(s) delivered."
+        else:
+            summary = f"{sent} sent, {failed} failed."
+        append(summary, curses.A_BOLD)
+
         win.refresh()
         self.draw_overlay_footer("Done. Press any key.")
         while True:
@@ -704,7 +1036,7 @@ class TuiApp:
 
     def send_flow(self) -> None:
         entries = core.list_entries()
-        picked = self.list_picker("Select list(s)", entries, multi=True)
+        picked = self.list_picker("Filter Recipients", entries, multi=True)
         if not picked:
             return
         picked_entries = [picked] if isinstance(picked, tuple) else picked
@@ -757,14 +1089,20 @@ class TuiApp:
         else:
             return
 
-        message = self.input_multiline("Compose message")
-        if message is None or not message.strip():
-            return
-
-        normalized = core.normalize_message(message)
-        if not self.preview_send(list_label, resolved, missing, normalized):
-            return
-        self.send_messages(resolved, normalized)
+        message: str | None = None
+        while True:
+            message = self.input_multiline("Compose message", message or "")
+            if message is None or not message.strip():
+                return
+            normalized = core.normalize_message(message)
+            choice = self.preview_send(list_label, resolved, missing, normalized)
+            if choice == "cancel":
+                return
+            if choice == "edit":
+                continue
+            if choice == "send":
+                self.send_messages(resolved, normalized)
+                return
 
     def list_flow(self) -> None:
         while True:
@@ -809,11 +1147,11 @@ class TuiApp:
                 win.refresh()
                 self.draw_overlay_footer("Enter select | Esc back")
                 ch = win.getch()
-                if ch in (curses.KEY_UP, ord("k")):
+                if self.is_nav_up(ch) or ch == ord("k"):
                     idx = max(0, idx - 1)
-                elif ch in (curses.KEY_DOWN, ord("j")):
+                elif self.is_nav_down(ch) or ch == ord("j"):
                     idx = min(len(options) - 1, idx + 1)
-                elif ch in (10, 13):
+                elif ch in (10, 13, curses.KEY_ENTER):
                     return options[idx][1]
                 elif ch == 27:
                     return None
@@ -940,10 +1278,10 @@ class TuiApp:
         lines = [
             "Send: choose list(s), then pick people or use full lists.",
             "Lists: preview, add, or remove names and numbers.",
-            "Pickers: type to fuzzy-filter; Space toggles selection.",
+            "Pickers: type to fuzzy-filter; arrows/Ctrl+N/P/Ctrl+J/K move; Space toggles selection.",
             "Recipients: manual entry supports comma or space separated names.",
             "Message: Ctrl+D to finish, Esc to cancel.",
-            "Keys: arrows or j/k to move, Enter to select, Esc to go back.",
+            "Keys: arrows (or Ctrl+N/P/Ctrl+J/K) move; Enter selects; Esc backs out.",
         ]
         while True:
             width = 78
